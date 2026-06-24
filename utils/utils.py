@@ -9,7 +9,7 @@ class ImageFolderDataset(Dataset):
         self.root = root
         self.transform = transform
         self.files = list(os.listdir(root))
-        self.files = [p for p in self.files if p.endswith('.jpg', '.png', '.jpeg')]
+        self.files = [p for p in self.files if p.endswith(('.jpg', '.png', '.jpeg'))]
 
     def __len__(self):
         return len(self.files)
