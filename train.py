@@ -4,9 +4,11 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
 import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from pathlib import Path
 from utils.utils import *
-from torch.utils.data import DataLoader
+from utils.models import *
 
 def parse_argument():
     parser = argparse.ArgumentParser()
@@ -22,6 +24,9 @@ def parse_argument():
     parser.add_argument('--crop', action='store_true', default=True, help="Crop Image")
    
     parser.add_argument('--batch_size', type=int, default=4, help="Set the batch size")
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--lr_decay', type=float, default=5e-5, help='Learning rate decay')
+    
     return parser.parse_args()
 
 def main():
@@ -56,8 +61,15 @@ def main():
     print("Number of batches in content dataset", len(content_dataloader))
     print("Number of batches in style dataset", len(style_dataloader))
 
-    for batch in style_dataloader:
-        print(batch.shape)
+    encoder = VGGEncoder(args.vgg).to(device)
+    decoder = Decoder().to(device)
+
+    optimizer = optim.Adam(decoder.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda epoch: 1.0 / (1.0 + args.lr_decay * epoch)
+    )
+    
 
 
 
