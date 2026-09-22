@@ -93,14 +93,14 @@ class VGGEncoder(nn.Module):
             for param in getattr(self, name).parameters():
                 param.requires_grad = False
         
-    def forward(self, input, is_test=False):
+    def forward(self, input, test=False):
         h1 = self.enc_1(input)
         h2 = self.enc_2(h1)
         h3 = self.enc_3(h2)
         h4 = self.enc_4(h3)
 
         # h1,h2,h3 => only used to loss compute
-        if is_test:
+        if test:
             return h4
         return h1, h2, h3, h4
     

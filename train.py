@@ -10,6 +10,7 @@ from pathlib import Path
 from utils.utils import *
 from utils.models import *
 from tqdm import tqdm  # comman library use to tracking loop
+from torchvision.utils import save_image
 
 def parse_argument():
     parser = argparse.ArgumentParser()
@@ -30,8 +31,14 @@ def parse_argument():
     
     parser.add_argument('--epochs', type=int, default=1, help="Number of epochs")
     parser.add_argument('--content_weight', type=float, default=1.0, help='Content weight')
-    parser.add_argument('--style_weight', type=float, default=10, help='Style weight')
-    parser.add_argument('--log_interval', type=int, default=5, help="Log Interval")
+    parser.add_argument('--style_weight', type=float, default=5, help='Style weight')
+    parser.add_argument('--log_interval', type=int, default=1, help="Log Interval")
+    parser.add_argument('--save_interval', type=int, default=2, help="Log Interval")
+    
+    parser.add_argument('--resume', action='store_true', default=False, help="Resume training")
+    parser.add_argument('--decoder_path', type=str, default=None, help="path to decoder checkpoint")
+    parser.add_argument('--optimizer_path', type=str, default=None, help="path to optimizer checkpoint")
+
     return parser.parse_args()
 
 def main():
@@ -76,6 +83,10 @@ def main():
         optimizer,
         lr_lambda=lambda epoch: 1.0 / (1.0 + args.lr_decay * epoch)
     )
+
+    if args.resume:
+        decoder.load_state_dict(torch.load(args.decoder_path))
+        optimizer.load_state_dict(torch.load(args.optimizer_path))
 
     print("Training...")
     
@@ -147,6 +158,13 @@ def main():
         if (epoch+1) % args.log_interval == 0:
             tqdm.write(f'Iter {epoch+1}: Loss: {running_loss:4f}, Content Loss: {running_closs:4f}, Style loss: {running_sloss:4f}')
 
+        if (epoch+1) % args.save_interval == 0:
+            torch.save(decoder.state_dict(), save_dir / f'decoder_{epoch+1}.pth')
+            torch.save(optimizer.state_dict(), save_dir / f'optimizer_{epoch+1}.pth')
+
+            with torch.no_grad():
+                output = torch.cat([content_batch, style_batch, g], dim=0)
+                save_image(output, save_dir / f'output_{epoch+1}.png', nrow=args.batch_size)
 
 
 

@@ -7,3 +7,5 @@ style_data/
 style_data_demo/
 
 experiment/
+
+.pth
