@@ -1,4 +1,8 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="{{ csrf_token() }}">
 <title>AdaIN Style Transfer</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
@@ -512,8 +516,7 @@
 </div>
 
 <div class="container mb-5 fade-in-up">
-    <form method="post" enctype="multipart/form-data" id="uploadForm">
-        {{ form.hidden_tag() }}
+    <form id="uploadForm" enctype="multipart/form-data">
         
         <div class="row g-4">
             <!-- Content Image Section -->
@@ -522,13 +525,10 @@
                     <div class="card-header text-center py-3">Content Source</div>
                     <div class="card-body text-center">
                         <div class="preview-image mb-3" id="contentPreview">
-                            {% if content_image %}
-                                <img src="{{ url_for('send_image', filename=content_image) }}" alt="Content Image">
-                            {% else %}
-                                <span>Select Content Image</span>
-                            {% endif %}
+                            <span>Select Content Image</span>
                         </div>
-                        {{ form.content(class="form-control", onchange="previewFile(this, 'contentPreview')") }}
+                        <input type="file" name="content" id="contentInput" class="form-control" accept="image/png,image/jpeg" onchange="previewFile(this, 'contentPreview')" />
+                        <input type="hidden" name="content_path" id="contentPath" />
                     </div>
                 </div>
             </div>
@@ -539,13 +539,10 @@
                     <div class="card-header text-center py-3">Style Reference</div>
                     <div class="card-body text-center">
                         <div class="preview-image mb-3" id="stylePreview">
-                            {% if style_image %}
-                                <img src="{{ url_for('send_image', filename=style_image) }}" alt="Style Image">
-                            {% else %}
-                                <span>Select Style Image</span>
-                            {% endif %}
+                            <span>Select Style Image</span>
                         </div>
-                        {{ form.style(class="form-control", onchange="previewFile(this, 'stylePreview')") }}
+                        <input type="file" name="style" id="styleInput" class="form-control" accept="image/png,image/jpeg" onchange="previewFile(this, 'stylePreview')" />
+                        <input type="hidden" name="style_path" id="stylePath" />
                     </div>
                 </div>
             </div>
@@ -555,40 +552,39 @@
         <div class="row justify-content-center mt-4">
             <div class="col-md-8">
                 <div class="range-wrap">
-                    <label for="alpha" class="form-label fw-bold mb-3 d-block text-center" style="font-family: 'Orbitron', sans-serif; letter-spacing: 1px; color: #a855f7;">STYLE STRENGTH</label>
+                    <label for="alphaRange" class="form-label fw-bold mb-3 d-block text-center" style="font-family: 'Orbitron', sans-serif; letter-spacing: 1px; color: #a855f7;">STYLE STRENGTH</label>
                     <div class="position-relative">
                         <div class="range-value" id="rangeValue">1.0</div>
-                        {{ form.alpha(class="form-control-range", id="alphaRange", type="range", min="0", max="1", step="0.1") }}
+                        <input type="range" name="alpha" id="alphaRange" class="form-control-range" min="0" max="1" step="0.1" value="1.0" />
                     </div>
                 </div>
                 <div class="text-center mt-5">
-                    {{ form.submit(class="btn btn-primary shadow-lg btn-glow") }}
+                    <button type="submit" id="submitBtn" class="btn btn-primary shadow-lg btn-glow">Transfer Style</button>
                 </div>
             </div>
         </div>
     </form>
 
-    {% if result_image %}
-    <div class="row justify-content-center mt-5" id="resultSection">
+    <!-- Error banner -->
+    <div id="errorBanner" class="alert alert-danger mt-4 text-center d-none" role="alert" style="background: rgba(220, 38, 38, 0.2); border-color: #dc2626; color: #fecaca;">
+        <strong>Error:</strong> <span id="errorText"></span>
+    </div>
+
+    <!-- Result section (hidden until inference finishes) -->
+    <div id="resultSection" class="row justify-content-center mt-5 d-none">
         <div class="col-md-8">
             <div class="card border-success">
-                <div class="card-header bg-success text-white fw-bold text-center py-3" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">Stylized Result</div>
+                <div class="card-header fw-bold text-white text-center py-3" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">Stylized Result</div>
                 <div class="card-body p-0">
-                    <img src="{{ url_for('send_image', filename=result_image) }}" class="img-fluid w-100" alt="Stylized Image" style="border-radius: 0 0 20px 20px;">
+                    <img id="resultImg" src="" class="img-fluid w-100" alt="Stylized Image" style="border-radius: 0 0 20px 20px;">
                 </div>
                 <div class="card-footer text-center" style="background: transparent; border-top: none; padding-bottom: 20px;">
-                    <a href="{{ url_for('send_image', filename=result_image) }}" download class="btn btn-outline-light mt-2">Download Result</a>
+                    <a id="downloadBtn" href="" download class="btn btn-outline-light mt-2">Download Result</a>
                 </div>
             </div>
         </div>
     </div>
-    {% endif %}
 
-    {% if error %}
-        <div class="alert alert-danger mt-4 text-center" role="alert" style="background: rgba(220, 38, 38, 0.2); border-color: #dc2626; color: #fecaca;">
-            <strong>Error:</strong> {{ error }}
-        </div>
-    {% endif %}
 </div>
 
 <section class="container examples-section fade-in-up">
@@ -770,33 +766,105 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+    // -----------------------------------------------------------------------
+    // Image preview helper
+    // -----------------------------------------------------------------------
     function previewFile(input, previewId) {
         const preview = document.getElementById(previewId);
         const file = input.files[0];
+        if (!file) return;
         const reader = new FileReader();
-
-        reader.addEventListener("load", function () {
-            // Convert image file to base64 string
+        reader.addEventListener('load', () => {
             preview.innerHTML = `<img src="${reader.result}" alt="Image Preview">`;
-        }, false);
-
-        if (file) {
-            reader.readAsDataURL(file);
-        }
+        });
+        reader.readAsDataURL(file);
     }
 
-    // Restore previews if page reloads with data (optional enhancement)
+    // -----------------------------------------------------------------------
+    // Async form submission + polling
+    // -----------------------------------------------------------------------
+    const form = document.getElementById('uploadForm');
+    const loader = document.getElementById('loader');
+    const errorBanner = document.getElementById('errorBanner');
+    const errorText = document.getElementById('errorText');
+    const resultSection = document.getElementById('resultSection');
+    const resultImg = document.getElementById('resultImg');
+    const downloadBtn = document.getElementById('downloadBtn');
+    let pollTimer = null;
+
+    function showError(msg) {
+        loader.style.display = 'none';
+        errorBanner.classList.remove('d-none');
+        errorText.textContent = msg;
+    }
+
+    function pollStatus(jobId) {
+        fetch(`/status/${jobId}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'done') {
+                    loader.style.display = 'none';
+                    const url = `/uploads/${data.result}`;
+                    resultImg.src = url;
+                    downloadBtn.href = url;
+                    resultSection.classList.remove('d-none');
+                    resultSection.scrollIntoView({ behavior: 'smooth' });
+                } else if (data.status === 'error') {
+                    showError(data.error || 'Inference failed.');
+                } else {
+                    // queued or running — keep polling
+                    pollTimer = setTimeout(() => pollStatus(jobId), 2000);
+                }
+            })
+            .catch(err => showError('Network error while polling: ' + err));
+    }
+
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        const contentFile = document.getElementById('contentInput').files[0];
+        const styleFile = document.getElementById('styleInput').files[0];
+        if (!contentFile) { showError('Please select a content image.'); return; }
+        if (!styleFile)   { showError('Please select a style image.'); return; }
+
+        // Reset UI
+        errorBanner.classList.add('d-none');
+        resultSection.classList.add('d-none');
+        if (pollTimer) clearTimeout(pollTimer);
+
+        // Show loader
+        loader.style.display = 'flex';
+
+        const fd = new FormData(form);
+        const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+        fetch('/stylize', {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken },
+            body: fd
+        })
+        .then(r => {
+            if (!r.ok) {
+                return r.text().then(t => { throw new Error(`Server error ${r.status}: ${t.substring(0, 200)}`); });
+            }
+            return r.json();
+        })
+        .then(data => {
+            if (data.error) { showError(data.error); return; }
+            // Start polling
+            pollTimer = setTimeout(() => pollStatus(data.job_id), 2000);
+        })
+        .catch(err => showError('Upload failed: ' + err));
+    });
+
+    // -----------------------------------------------------------------------
+    // Window onload: canvas animation + range slider
+    // -----------------------------------------------------------------------
     window.onload = function() {
-        if(document.getElementById('resultSection')) {
-            document.getElementById('resultSection').scrollIntoView({behavior: "smooth"});
-        }
-        // Neural Network Background Animation
         const canvas = document.getElementById('neuralCanvas');
         const ctx = canvas.getContext('2d');
         let width, height;
         let particles = [];
         let mouse = { x: null, y: null, radius: 150 };
-
 
         function resize() {
             width = canvas.width = window.innerWidth;
@@ -810,15 +878,12 @@
                 this.vx = (Math.random() - 0.5) * 0.5;
                 this.vy = (Math.random() - 0.5) * 0.5;
                 this.size = Math.random() * 3 + 1.5;
-                // Assign one of 10 colors to group nodes
                 this.hue = Math.floor(Math.random() * 10) * 36;
                 this.density = (Math.random() * 30) + 1;
             }
             update() {
                 this.x += this.vx;
                 this.y += this.vy;
-
-                // Mouse interaction
                 if (mouse.x != null) {
                     let dx = mouse.x - this.x;
                     let dy = mouse.y - this.y;
@@ -827,13 +892,10 @@
                         const forceDirectionX = dx / distance;
                         const forceDirectionY = dy / distance;
                         const force = (mouse.radius - distance) / mouse.radius;
-                        const directionX = forceDirectionX * force * this.density;
-                        const directionY = forceDirectionY * force * this.density;
-                        this.x -= directionX;
-                        this.y -= directionY;
+                        this.x -= forceDirectionX * force * this.density;
+                        this.y -= forceDirectionY * force * this.density;
                     }
                 }
-
                 if (this.x < 0 || this.x > width) this.vx *= -1;
                 if (this.y < 0 || this.y > height) this.vy *= -1;
                 this.hue = (this.hue + 0.2) % 360;
@@ -877,37 +939,25 @@
         window.addEventListener('mousemove', (event) => {
             mouse.x = event.clientX;
             mouse.y = event.clientY;
-        });        
+        });
         resize();
         initParticles();
         animate();
-        // Range Slider Logic
+
+        // Range Slider
         const range = document.getElementById('alphaRange');
         const rangeValue = document.getElementById('rangeValue');
-
         function updateRange() {
             const val = range.value;
-            const min = range.min || 0;
-            const max = range.max || 1;
-            const percentage = ((val - min) * 100) / (max - min);
-            
+            const percentage = ((val - (range.min||0)) * 100) / ((range.max||1) - (range.min||0));
             rangeValue.textContent = val;
-            // Adjust position of the bubble to follow the thumb
             const thumbWidth = 24;
             const offset = thumbWidth/2 - (percentage * thumbWidth / 100);
             rangeValue.style.left = `calc(${percentage}% + ${offset}px)`;
-            
-            // Update gradient background
             range.style.background = `linear-gradient(to right, #818cf8 0%, #c084fc ${percentage}%, rgba(30, 41, 59, 0.8) ${percentage}%, rgba(30, 41, 59, 0.8) 100%)`;
         }
-
-        if(range) {
-            range.addEventListener('input', updateRange);
-            updateRange(); // Init
-        }
-
-
-    }
+        if (range) { range.addEventListener('input', updateRange); updateRange(); }
+    };
 </script>
 </body>
 </html>

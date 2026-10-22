@@ -1,19 +1,21 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-import torch
-from flask import Flask, render_template, request, redirect, url_for, send_from_directory
-from flask_wtf import FlaskForm
-from flask_bootstrap import Bootstrap
-from werkzeug.utils import secure_filename
-from wtforms import FileField, SubmitField, FloatField, HiddenField
-from wtforms.validators import InputRequired
-from PIL import Image
-from torchvision import transforms
-import io
-
+import gc
+import uuid
+import threading
 import time
 import traceback
+from collections import OrderedDict
+
+import torch
+from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask_wtf import FlaskForm
+from flask_wtf.csrf import CSRFProtect
+from werkzeug.utils import secure_filename
+from wtforms import FileField, SubmitField, FloatField, HiddenField
+from PIL import Image
+from torchvision import transforms
 
 # import existing AdaIn code
 from src.encoder import VGGEncoder
@@ -26,145 +28,214 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'supersecretkey'
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'static', 'uploads')
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
-Bootstrap(app)
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB upload limit
+csrf = CSRFProtect(app)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-class UploadForm(FlaskForm):
-    content = FileField('Content Image')
-    style = FileField('Style Image')
-    content_path = HiddenField()
-    style_path = HiddenField()
-    alpha = FloatField('Alpha', default=1.0)
-    submit = SubmitField('Transfer Style')
+# ---------------------------------------------------------------------------
+# In-memory job store  (OrderedDict; capped at 100 entries)
+# ---------------------------------------------------------------------------
+_jobs: OrderedDict = OrderedDict()
+_jobs_lock = threading.Lock()
+MAX_JOBS = 100
 
-# set device
+_inference_queue: list = []
+_queue_lock = threading.Lock()
+_worker_thread = None
+_worker_event = threading.Event()
+
+
+def _get_or_start_worker():
+    global _worker_thread
+    if _worker_thread is None or not _worker_thread.is_alive():
+        _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
+        _worker_thread.start()
+
+
+def _worker_loop():
+    while True:
+        _worker_event.wait(timeout=60)
+        _worker_event.clear()
+        while True:
+            with _queue_lock:
+                if not _inference_queue:
+                    break
+                job_id, content_path, style_path, alpha = _inference_queue.pop(0)
+            _run_inference(job_id, content_path, style_path, alpha)
+
+
+def _run_inference(job_id, content_path, style_path, alpha):
+    _set_job(job_id, status='running')
+    content_tensor = style_tensor = stylized_image = None
+    content_feats = style_feats = stylized_feats = None
+    try:
+        t0 = time.perf_counter()
+        content_image = Image.open(content_path).convert('RGB')
+        style_image = Image.open(style_path).convert('RGB')
+
+        transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+        ])
+
+        content_tensor = transform(content_image).unsqueeze(0).to(device)
+        style_tensor = transform(style_image).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            content_feats = encoder(content_tensor, test=True)
+            style_feats = encoder(style_tensor, test=True)
+            stylized_feats = adaptive_instance_normalization(content_feats, style_feats)
+            stylized_feats = alpha * stylized_feats + (1 - alpha) * content_feats
+            stylized_image = decoder(stylized_feats)
+
+        result_filename = f'stylized_{job_id}.jpg'
+        result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
+        img_tensor = stylized_image.cpu().squeeze(0).clamp(0, 1)
+        transforms.ToPILImage()(img_tensor).save(result_path, quality=90)
+
+        elapsed = time.perf_counter() - t0
+        app.logger.info("NST job %s done in %.2fs", job_id, elapsed)
+        _set_job(job_id, status='done', result=result_filename, elapsed=round(elapsed, 2))
+
+    except Exception:
+        app.logger.exception("NST job %s failed", job_id)
+        _set_job(job_id, status='error', error=traceback.format_exc())
+    finally:
+        del content_tensor, style_tensor, stylized_image
+        del content_feats, style_feats, stylized_feats
+        gc.collect()
+
+
+def _set_job(job_id, **kwargs):
+    with _jobs_lock:
+        if job_id not in _jobs:
+            _jobs[job_id] = {}
+        _jobs[job_id].update(kwargs)
+        while len(_jobs) > MAX_JOBS:
+            _jobs.popitem(last=False)
+
+
+def _enqueue(job_id, content_path, style_path, alpha):
+    with _queue_lock:
+        _inference_queue.append((job_id, content_path, style_path, alpha))
+    _worker_event.set()
+    _get_or_start_worker()
+
+# ---------------------------------------------------------------------------
+# Model loading — once at startup
+# ---------------------------------------------------------------------------
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+app.logger.info("NST: loading models on device=%s", device)
 
 encoder = VGGEncoder(os.path.join(BASE_DIR, 'vgg_normalised.pth')).to(device)
 decoder = Decoder().to(device)
-
-decoder_path = os.path.join(BASE_DIR, "decoder.pth")
-
 decoder.load_state_dict(
-    torch.load(
-        decoder_path,
-        map_location=device
-    )
+    torch.load(os.path.join(BASE_DIR, 'decoder.pth'), map_location=device)
 )
-
 encoder.eval()
 decoder.eval()
+app.logger.info("NST: models loaded")
 
 def allowed_file(filename):
-    return '.' in filename and  filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+    return (
+        '.' in filename
+        and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+    )
 
-def style_transfer(content_image, style_image, encoder, decoder, alpha, device):
-    transform = transforms.Compose([
-        transforms.Resize((512, 512)),  # Keep reasonable for CPU inference
-        transforms.ToTensor()
-    ])
 
-    content_image = transform(content_image).unsqueeze(0).to(device)
-    style_image = transform(style_image).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        content_feats = encoder(content_image, test=True)
-        style_feats = encoder(style_image, test=True)
-
-        stylized_feats = adaptive_instance_normalization(content_feats, style_feats)
-
-        stylized_feats = alpha * stylized_feats + (1 - alpha) * content_feats
-
-        stylized_image = decoder(stylized_feats)
-
-    return stylized_image
-
-def save_image(image_tensor, path):
-    image_tensor = image_tensor.cpu().clone()
-    image_tensor = image_tensor.squeeze(0)
-    image_tensor = image_tensor.clamp(0, 1)
-    image = transforms.ToPILImage()(image_tensor)
-    image.save(path)
-
-@app.route('/', methods=['GET', 'POST'])
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+@app.route('/', methods=['GET'])
 def index():
-    form = UploadForm()
-    result_image = None
+    return render_template('index.html')
+
+
+@app.route('/stylize', methods=['POST'])
+def stylize():
+    """
+    Accepts multipart/form-data with fields:
+      content        – image file  (or absent if re-using content_path)
+      style          – image file  (or absent if re-using style_path)
+      content_path   – filename of a previously uploaded content image
+      style_path     – filename of a previously uploaded style image
+      alpha          – float 0-1
+
+    Returns JSON: { job_id, content_image, style_image }
+    The response is sent immediately; inference happens in a background thread.
+    """
     content_filename = None
     style_filename = None
-    error = None
 
-    if form.validate_on_submit():
-        if form.content.data and form.content.data.filename:
-            if allowed_file(form.content.data.filename):
-                content_filename = secure_filename(form.content.data.filename)
-                form.content.data.save(os.path.join(app.config['UPLOAD_FOLDER'], content_filename))
-                form.content_path.data =  content_filename
-        else:
-            content_filename = form.content_path.data
+    content_file = request.files.get('content')
+    if content_file and content_file.filename:
+        if not allowed_file(content_file.filename):
+            return jsonify({'error': 'Content image must be PNG or JPG.'}), 400
+        content_filename = secure_filename(content_file.filename)
+        content_file.save(os.path.join(app.config['UPLOAD_FOLDER'], content_filename))
+    else:
+        content_filename = request.form.get('content_path', '').strip() or None
 
-        if form.style.data and form.style.data.filename:
-            if allowed_file(form.style.data.filename):
-                style_filename = secure_filename(form.style.data.filename)
-                form.style.data.save(os.path.join(app.config['UPLOAD_FOLDER'], style_filename))
-                form.style_path.data = style_filename
-        else:
-            style_filename = form.style_path.data
+    style_file = request.files.get('style')
+    if style_file and style_file.filename:
+        if not allowed_file(style_file.filename):
+            return jsonify({'error': 'Style image must be PNG or JPG.'}), 400
+        style_filename = secure_filename(style_file.filename)
+        style_file.save(os.path.join(app.config['UPLOAD_FOLDER'], style_filename))
+    else:
+        style_filename = request.form.get('style_path', '').strip() or None
 
-        if content_filename and style_filename:
-            content_path = os.path.join(app.config['UPLOAD_FOLDER'], content_filename)
-            style_path = os.path.join(app.config['UPLOAD_FOLDER'], style_filename)
+    if not content_filename or not style_filename:
+        return jsonify({'error': 'Please provide both content and style images.'}), 400
 
-            try:
-                start = time.perf_counter()
-                app.logger.info("NST: opening uploaded images")
+    content_path = os.path.join(app.config['UPLOAD_FOLDER'], content_filename)
+    style_path = os.path.join(app.config['UPLOAD_FOLDER'], style_filename)
 
-                content_image = Image.open(content_path).convert('RGB')
-                style_image = Image.open(style_path).convert('RGB')
+    if not os.path.exists(content_path):
+        return jsonify({'error': f'Content file not found: {content_filename}'}), 400
+    if not os.path.exists(style_path):
+        return jsonify({'error': f'Style file not found: {style_filename}'}), 400
 
-                alpha = float(form.alpha.data)
-                t = time.perf_counter()
+    try:
+        alpha = float(request.form.get('alpha', 1.0))
+        alpha = max(0.0, min(1.0, alpha))
+    except (TypeError, ValueError):
+        alpha = 1.0
 
-                stylized_image = style_transfer(content_image, style_image, encoder, decoder, alpha, device)
+    job_id = str(uuid.uuid4())
+    _set_job(job_id, status='queued',
+             content_image=content_filename,
+             style_image=style_filename)
+    _enqueue(job_id, content_path, style_path, alpha)
 
-                app.logger.info(
-                    "NST: inference completed in %.2f seconds",
-                    time.perf_counter() - t
-                )
+    app.logger.info("NST: enqueued job %s", job_id)
+    return jsonify({
+        'job_id': job_id,
+        'content_image': content_filename,
+        'style_image': style_filename,
+    })
 
-                result_filename = 'stylized_' + content_filename
-                result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
-                save_image(stylized_image, result_path)
 
-                result_image = result_filename
-
-                app.logger.info(
-                    "NST: request completed in %.2f seconds",
-                    time.perf_counter() - start
-                )
-
-            except Exception as e:
-                app.logger.exception("NST: request processing failed")
-                error = f"Image precoessing failed. please try smaller images -> {str(e)}"
-                 
-    elif request.method == 'POST':
-        # Only show validation errors on an actual POST submission
-        if not content_filename:
-            error = 'Please upload content image'
-        if not style_filename:
-            error = 'Please upload style image'
-
-    return render_template('index.html', form=form, result_image=result_image, content_image=content_filename, style_image=style_filename, error=error)
+@app.route('/status/<job_id>')
+def job_status(job_id):
+    """Polling endpoint. Returns job state as JSON."""
+    with _jobs_lock:
+        job = dict(_jobs.get(job_id, {}))
+    if not job:
+        return jsonify({'status': 'not_found'}), 404
+    return jsonify(job)
 
 
 @app.route('/uploads/<filename>')
 def send_image(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+
 @app.route('/examples/<path:filename>')
 def send_example(filename):
     return send_from_directory('examples', filename)
+
 
 if __name__ == '__main__':
     from werkzeug.serving import run_simple
