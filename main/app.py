@@ -12,6 +12,9 @@ from PIL import Image
 from torchvision import transforms
 import io
 
+import time
+import traceback
+
 # import existing AdaIn code
 from src.encoder import VGGEncoder
 from src.decoder import Decoder
@@ -58,7 +61,7 @@ def allowed_file(filename):
 
 def style_transfer(content_image, style_image, encoder, decoder, alpha, device):
     transform = transforms.Compose([
-        transforms.Resize((256, 256)),  # Adjust size as needed
+        transforms.Resize((512, 512)),  # Keep reasonable for CPU inference
         transforms.ToTensor()
     ])
 
@@ -114,11 +117,21 @@ def index():
             style_path = os.path.join(app.config['UPLOAD_FOLDER'], style_filename)
 
             try:
+                start = time.perf_counter()
+                app.logger.info("NST: opening uploaded images")
+
                 content_image = Image.open(content_path).convert('RGB')
                 style_image = Image.open(style_path).convert('RGB')
 
                 alpha = float(form.alpha.data)
+                t = time.perf_counter()
+
                 stylized_image = style_transfer(content_image, style_image, encoder, decoder, alpha, device)
+
+                app.logger.info(
+                    "NST: inference completed in %.2f seconds",
+                    time.perf_counter() - t
+                )
 
                 result_filename = 'stylized_' + content_filename
                 result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
@@ -126,8 +139,14 @@ def index():
 
                 result_image = result_filename
 
+                app.logger.info(
+                    "NST: request completed in %.2f seconds",
+                    time.perf_counter() - start
+                )
+
             except Exception as e:
-                error = str(e)
+                app.logger.exception("NST: request processing failed")
+                error = f"Image precoessing failed. please try smaller images -> {str(e)}"
                  
     elif request.method == 'POST':
         # Only show validation errors on an actual POST submission
