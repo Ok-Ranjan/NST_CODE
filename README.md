@@ -1,108 +1,125 @@
-# Neural Style Transfer with AdaIN
+# Real-Time Neural Style Transfer (AdaIN)
 
-A PyTorch-based Neural Style Transfer project that combines the
-content structure of one image with the artistic style of another
-using Adaptive Instance Normalization (AdaIN).
+A lightweight PyTorch implementation of arbitrary Neural Style Transfer based on **Adaptive Instance Normalization (AdaIN)**. It blends the structural content of any photo with the colors, strokes, and textures of any artwork in real time.
 
-## First View of the Project
+---
+
+## 🚀 Live Demo
+
+Try the app directly in your browser:
+
+- **Hugging Face Spaces (ZeroGPU):** [Live Demo on Hugging Face](https://ok-ranjan-nst-project.hf.space/) *(Fast GPU inference)*
+- **Render (Free Web Service):** [Live Demo on Render](https://nst-project-vruz.onrender.com/) *(CPU deployment with async job queue)*
+
+> *Note on Render free tier: The service spins down when idle and may take 30–50 seconds to wake up on the first request.*
+
+---
+
+## 💡 How It Works
+
+Instead of running slow optimization loops for each image (like traditional style transfer), AdaIN transfers style in a single feed-forward step:
 
 ```text
-Content Image ──> vgg-19 Encoder ──┐
-                                    ├──> AdaIN ──> Decoder ──> Stylized Image 
-Style Image ────> vgg-19 Encoder ──┘
+Content Image ──> [ Frozen VGG-19 ] ──> Content Features ──┐
+                                                           ├──> [ AdaIN Layer ] ──> [ Trained Decoder ] ──> Stylized Output
+Style Image   ──> [ Frozen VGG-19 ] ──> Style Features   ──┘
 ```
 
-**VGG extracts features -> AdaIN transfer style statistics -> Decoder reconstructs the image -> Content/style losses train the decoder.**
+1. **Feature Extraction:** A pre-trained, frozen VGG-19 extracts feature maps up to layer `relu4_1`.
+2. **AdaIN Layer:** It strips the content image's original lighting and color, then scales and shifts it using the mean and variance (style signature) of the artwork.
+3. **Decoder Reconstruction:** A custom convolutional decoder (trained on ~50k images) maps the stylized features back into an RGB photo.
+4. **Style Strength ($\alpha$):** A slider interpolates between original content features and stylized features ($0.0 \le \alpha \le 1.0$), letting you control how strong the painting effect is.
 
-## About
+---
 
-This project implements Neural Style Transfer using an AdaIN-based
-architecture.
+## ✨ Features
 
-The project currently focuses on:
-- VGG-19 based feature extraction
-- Adaptive Instance Normalization (AdaIN)
-- Trainable image decoder
-- PyTorch training pipeline
-- Content and style loss
-- Image-to-image style transfer
+- **Arbitrary Style Transfer:** Works with any pair of images instantly — no fine-tuning or retraining per style.
+- **Adjustable Style Weight ($\alpha$):** Fine-tune the blend from subtle color grading to full artistic transformation.
+- **Asynchronous Worker Queue:** Built with background threading and polling on the Flask backend so requests never hit Render's 30-second proxy timeout during CPU inference.
+- **Interactive Web UI:** Clean dark-mode interface with drag-and-drop upload, preset example images, and side-by-side comparison.
 
-## Development Journey
+---
 
-1. Understand Neural Style Transfer
-2. Implement feature statistics and AdaIN
-3. Build the VGG-19 Encoder
-4. Freeze the encoder
-5. Build the decoder
-6. Build dataset/Dataloaders
-7. Connect VGG -> AdaIN -> Decoder
-8. Re-encode generated images
-9. Calculate content/style losses
-10. Train and checkpoint the decoder
-11. Generate and inspect outputs
-12. Refactor notebook code into resuable modules
+## 🛠️ Tech Stack
 
-## How It Works
+- **Model:** PyTorch, torchvision (VGG-19 encoder + custom mirror Decoder)
+- **Backend:** Flask, Flask-WTF, Gunicorn, background threading
+- **Frontend:** HTML5, CSS3 (glassmorphic dark UI), Vanilla JavaScript
+- **Training:** Kaggle GPU environment (50 epochs on MS-COCO + WikiArt)
+- **Hosting:** Hugging Face Spaces (ZeroGPU) & Render Free Tier
 
-1. A content image is provided.
-2. A style image is provided.
-3. VGG-19 extracts feature representations.
-4. AdaIN transfers the style statistics to the content features.
-5. The decoder reconstructs the stylized image.
-6. The resulting image is returned as the output.
+---
 
-## Current Status
+## 📁 Project Structure
 
-| Component | Status |
-|---|---|
-| Learning NST research | ✅ |
-| AdaIN implementation | ✅ |
-| VGG-19 encoder | ✅ |
-| Decoder | ✅ |
-| Training pipeline | ✅ |
-| Initial model training | ✅ |
-| Inference pipeline | 🚧 |
-| FastAPI integration | 🚧 |
-| Deployment | 🚧 |
-
-## Requirements
-
-The notebook uses Python, PyTorch, torchvision, Pillow and tqdm, along with standard Python utilities.
-
-### Installation
+```text
+NST_CODE/
+├── main/
+│   ├── app.py                # Flask web server & async inference worker
+│   ├── decoder.pth           # Trained decoder weights (epoch 50)
+│   ├── vgg_normalised.pth    # Pretrained VGG-19 encoder weights
+│   ├── src/
+│   │   ├── encoder.py        # Sliced VGG-19 encoder (relu1_1 to relu4_1)
+│   │   ├── decoder.py        # Custom decoder network
+│   │   ├── adain.py          # Adaptive Instance Normalization logic
+│   │   └── utils.py          # Image transformations & helper utilities
+│   ├── templates/            # Web interface (index.html)
+│   └── static/               # Assets & uploaded image cache
+├── notebook/
+│   ├── TRAINING.md           # In-depth training documentation & loss analysis
+│   ├── nst-code-train-01.ipynb       # Initial training experiment
+│   └── nst-code-train-epoch50.ipynb  # 50-epoch Kaggle training run
+├── outputs/                  # Sample outputs across training epochs
+├── Procfile                  # Gunicorn entrypoint for Render
+├── requirements.txt          # Python dependencies
+└── README.md
 ```
-git clone repo_url
-cd neural_style_transfer
+
+---
+
+## 💻 Local Setup & Running
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/Ok-Ranjan/NST_CODE.git
+cd NST_CODE
+```
+
+### 2. Install dependencies
+It is recommended to use a virtual environment:
+```bash
+python -m venv venv
+# On Windows:
+venv\Scripts\activate
+# On Linux/macOS:
+source venv/bin/activate
+
 pip install -r requirements.txt
 ```
 
-## Training
+### 3. Run the web app
+```bash
+cd main
+python app.py
+```
+Open your browser and navigate to `http://localhost:5000`.
 
-Detailed training information is documented separately:
-→ [notebook/TRAINING.md](notebook/TRAINING.md)
+---
 
-The original training implementation is available in:
-→ [notebook/nst-code-train-01.ipynb](notebook/nst-code-train-01.ipynb)
+## 🏋️ Training Details
 
-## Dataset
+The decoder was trained for **50 epochs** on Kaggle GPU using:
+- **Content:** 40,670 images from [MS-COCO 2017](http://images.cocodataset.org/zips/test2017.zip)
+- **Style:** 11,025 artwork images from [WikiArt / Painter-by-Numbers](https://www.kaggle.com/competitions/painter-by-numbers)
+- **Optimizer:** Adam with inverse decay scheduler (`lr = 1e-4`)
+- **Loss:** Content MSE loss at `relu4_1` + multi-layer Style loss at `relu1_1`, `relu2_1`, `relu3_1`, `relu4_1`
 
-For Content Images : we use COCODATASET
-* [test cocodataset](http://images.cocodataset.org/zips/test2017.zip)
+For the complete loss formulation, hyperparameter tables, and convergence logs, check [notebook/TRAINING.md](notebook/TRAINING.md).
 
-For Style Iamges: kaggle [PAINTER-BY-NUMBERS](https://www.kaggle.com/competitions/painter-by-numbers/data?select=train_1.zip)
+---
 
-## Repository Structure
+## 📜 References
 
-
-## Usage
-
-user can provide:
-- Content image
-- Style image
-
-and receive:
-- Stylized output image
-
-## Documentation
-
-- (Training Documentation)[]
+- Xun Huang & Serge Belongie. *"Arbitrary Style Transfer in Real-time with Adaptive Instance Normalization"*, ICCV 2017. [arXiv:1703.06868](https://arxiv.org/abs/1703.06868)
+- Leon A. Gatys, Alexander S. Ecker, & Matthias Bethge. *"A Neural Algorithm of Artistic Style"*, CVPR 2016. [arXiv:1508.06576](https://arxiv.org/abs/1508.06576)
